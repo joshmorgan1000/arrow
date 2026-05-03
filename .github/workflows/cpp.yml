@@ -193,8 +193,10 @@ jobs:
         include:
           - architecture: AMD64
             macos-version: "15-intel"
+            arrow_metal: "OFF"  # Intel macOS runners are typically headless GPU-less
           - architecture: ARM64
             macos-version: "14"
+            arrow_metal: "ON"   # Apple Silicon runners always have Metal
     env:
       ARROW_AZURE: ON
       ARROW_BUILD_TESTS: ON
@@ -205,6 +207,7 @@ jobs:
       ARROW_HDFS: ON
       ARROW_HOME: /tmp/local
       ARROW_JEMALLOC: ON
+      ARROW_METAL: ${{ matrix.arrow_metal }}
       ARROW_ORC: ON
       ARROW_PARQUET: ON
       ARROW_S3: ON

@@ -1357,6 +1357,10 @@ if(ARROW_CUDA)
   add_subdirectory(gpu)
 endif()
 
+if(ARROW_METAL)
+  add_subdirectory(metal)
+endif()
+
 if(ARROW_DATASET)
   add_subdirectory(dataset)
 endif()
