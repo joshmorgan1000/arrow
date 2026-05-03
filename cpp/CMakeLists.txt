@@ -226,6 +226,18 @@ set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
 # cmake options
 include(DefineOptions)
 
+if(ARROW_METAL)
+  if(NOT APPLE)
+    message(FATAL_ERROR
+            "ARROW_METAL=ON requires an Apple platform. Disable ARROW_METAL "
+            "or build on macOS / iOS.")
+  endif()
+  # arrow_metal contains Objective-C++ sources (.mm). Enabling OBJCXX must
+  # happen at top-level scope before any source files are registered, or
+  # CMAKE_OBJCXX_COMPILE_OBJECT remains unset.
+  enable_language(OBJCXX)
+endif()
+
 if(ARROW_BUILD_SHARED AND NOT ARROW_POSITION_INDEPENDENT_CODE)
   message(WARNING "Can't disable position-independent code to build shared libraries, enabling"
   )
@@ -455,6 +467,13 @@ set(ARROW_CUDA_PC_CFLAGS "")
 set(ARROW_CUDA_PC_CFLAGS_PRIVATE "")
 if(ARROW_BUILD_STATIC)
   string(APPEND ARROW_CUDA_PC_CFLAGS_PRIVATE " -DARROW_CUDA_STATIC")
+endif()
+
+# For arrow-metal.pc.
+set(ARROW_METAL_PC_CFLAGS "")
+set(ARROW_METAL_PC_CFLAGS_PRIVATE "")
+if(ARROW_BUILD_STATIC)
+  string(APPEND ARROW_METAL_PC_CFLAGS_PRIVATE " -DARROW_METAL_STATIC")
 endif()
 
 # For arrow-dataset.pc.

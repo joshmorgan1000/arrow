@@ -1,0 +1,47 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+# This config sets the following variables in your project::
+#
+#   ArrowMetal_FOUND - true if Arrow Metal found on the system
+#
+# This config sets the following targets in your project::
+#
+#   ArrowMetal::arrow_metal_shared - linked as shared library
+#   ArrowMetal::arrow_metal_static - linked as static library
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+find_dependency(Arrow CONFIG)
+
+# Metal.framework and Foundation.framework ship with the macOS SDK,
+# so no external find_dependency is required, but downstream linkers
+# must pass `-framework Metal -framework Foundation`. The exported
+# target carries this via INTERFACE_LINK_LIBRARIES.
+if(NOT APPLE)
+  message(FATAL_ERROR
+          "ArrowMetal can only be used on Apple platforms (macOS, iOS).")
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/ArrowMetalTargets.cmake")
+
+arrow_keep_backward_compatibility(ArrowMetal arrow_metal)
+
+check_required_components(ArrowMetal)
+
+arrow_show_details(ArrowMetal ARROW_METAL)
