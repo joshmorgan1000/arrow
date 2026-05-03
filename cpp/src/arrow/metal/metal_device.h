@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -137,8 +138,17 @@ class ARROW_METAL_EXPORT MetalDevice : public Device {
      public:
         Status Wait() override;
         Status Record(const Device::Stream& stream) override;
+        /// \brief Const-correct accessor for the underlying opaque
+        /// `id<MTLSharedEvent>` handle. Shadows the non-const
+        /// `Device::SyncEvent::get_raw()` (upstream omits the const
+        /// overload) so `WaitEvent(const Device::SyncEvent&)` callers
+        /// don't need to const_cast their argument.
+        const void* get_raw() const { return sync_event_.get(); }
+        using Device::SyncEvent::get_raw;  ///< keep non-const overload
         /// \brief Counter value the underlying MTLSharedEvent must reach
-        uint64_t signal_value() const { return signal_value_; }
+        uint64_t signal_value() const {
+            return signal_value_.load(std::memory_order_acquire);
+        }
      protected:
         friend class MetalMemoryManager;
         SyncEvent(std::shared_ptr<MetalDevice> device, void* event,
@@ -148,7 +158,10 @@ class ARROW_METAL_EXPORT MetalDevice : public Device {
               signal_value_{0} {}
      private:
         std::shared_ptr<MetalDevice> device_;
-        uint64_t signal_value_;
+        /// Monotonically increasing counter. Atomic so concurrent
+        /// `Record()` and `Wait()` callers don't race on the read /
+        /// modify / write sequence in `Record`.
+        std::atomic<uint64_t> signal_value_;
     };
  public:
     struct Impl;  ///< opaque, defined in metal_device.mm

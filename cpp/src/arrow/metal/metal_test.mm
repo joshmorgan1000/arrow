@@ -15,11 +15,14 @@
 // specific language governing permissions and limitations
 // under the License.
 
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 #include "gtest/gtest.h"
 
@@ -87,6 +90,10 @@ TEST_F(MetalEnvironment, AllocateBufferZeroSize) {
     ASSERT_OK_AND_ASSIGN(auto buf, mm_->AllocateBuffer(0));
     EXPECT_NE(buf, nullptr);
     EXPECT_EQ(buf->device_type(), DeviceAllocationType::kMETAL);
+    // Arrow contract: zero-length request → size()==0 and capacity()==0,
+    // even though the underlying MTLBuffer is 1 byte (Apple rejects 0).
+    EXPECT_EQ(buf->size(), 0);
+    EXPECT_EQ(buf->capacity(), 0);
 }
 /** --------------------------------------------------------------------------------------------- DispatchByteDouble
  * @brief Run a tiny Metal compute kernel that multiplies each byte by 2.
@@ -99,7 +106,11 @@ TEST_F(MetalEnvironment, AllocateBufferZeroSize) {
 static Status DispatchByteDouble(MetalDevice& device, MetalBuffer& target) {
     @autoreleasepool {
         id<MTLDevice> dev = internal::FromOpaqueBorrowed<id<MTLDevice>>(device.mtl_device());
-        id<MTLBuffer> buf = internal::FromOpaqueBorrowed<id<MTLBuffer>>(target.mtl_buffer());
+        // root_mtl_buffer() walks the parent_ chain so this works for both
+        // root buffers and arbitrarily nested slices; the encoder sees the
+        // root MTLBuffer and the absolute byte offset.
+        id<MTLBuffer> buf = internal::FromOpaqueBorrowed<id<MTLBuffer>>(
+            target.root_mtl_buffer());
         if (dev == nil || buf == nil) {
             return Status::Invalid("DispatchByteDouble: nil handles");
         }
@@ -129,7 +140,9 @@ static Status DispatchByteDouble(MetalDevice& device, MetalBuffer& target) {
         id<MTLCommandBuffer> cb = [queue commandBuffer];
         id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
         [enc setComputePipelineState:pso];
-        [enc setBuffer:buf offset:0 atIndex:0];
+        // Slices report a non-zero `offset()`; pass that to the encoder
+        // so kernels operate on the right window of the root MTLBuffer.
+        [enc setBuffer:buf offset:static_cast<NSUInteger>(target.offset()) atIndex:0];
         const uint32_t n = static_cast<uint32_t>(target.size());
         [enc setBytes:&n length:sizeof(n) atIndex:1];
         const NSUInteger tg = pso.maxTotalThreadsPerThreadgroup < 256
@@ -168,17 +181,22 @@ TEST_F(MetalEnvironment, ZeroCopyHostView) {
     void* aligned = nullptr;
     ASSERT_EQ(::posix_memalign(&aligned, page, page), 0);
     std::memset(aligned, 0xAB, page);
-    auto cpu_buf = std::make_shared<Buffer>(static_cast<const uint8_t*>(aligned),
-                                            static_cast<int64_t>(page));
-    ASSERT_OK_AND_ASSIGN(auto view, MemoryManager::ViewBuffer(cpu_buf, mm_));
-    ASSERT_NE(view, nullptr);  ///< zero-copy view succeeded
-    ASSERT_EQ(view->device_type(), DeviceAllocationType::kMETAL);
-    EXPECT_EQ(view->data(), cpu_buf->data());  ///< same physical pointer
-    // Verify GPU sees the host-written pattern via the wrap path.
-    auto* mview = static_cast<MetalBuffer*>(view.get());
-    ASSERT_OK(DispatchByteDouble(*device_, *mview));
-    // 0xAB * 2 = 0x156 → low byte 0x56
-    EXPECT_EQ(static_cast<uint8_t>(cpu_buf->data()[0]), 0x56);
+    {
+        // Inner scope: view + cpu_buf must drop their MTLBuffer refs
+        // BEFORE std::free runs, otherwise the no-copy MTLBuffer's
+        // backing pages get freed while Metal still references them.
+        auto cpu_buf = std::make_shared<Buffer>(static_cast<const uint8_t*>(aligned),
+                                                static_cast<int64_t>(page));
+        ASSERT_OK_AND_ASSIGN(auto view, MemoryManager::ViewBuffer(cpu_buf, mm_));
+        ASSERT_NE(view, nullptr);  ///< zero-copy view succeeded
+        ASSERT_EQ(view->device_type(), DeviceAllocationType::kMETAL);
+        EXPECT_EQ(view->data(), cpu_buf->data());  ///< same physical pointer
+        // Verify GPU sees the host-written pattern via the wrap path.
+        auto* mview = static_cast<MetalBuffer*>(view.get());
+        ASSERT_OK(DispatchByteDouble(*device_, *mview));
+        // 0xAB * 2 = 0x156 → low byte 0x56
+        EXPECT_EQ(static_cast<uint8_t>(cpu_buf->data()[0]), 0x56);
+    }
     std::free(aligned);
 }
 TEST_F(MetalEnvironment, ZeroCopyHostViewUnalignedFallsBack) {
@@ -187,12 +205,14 @@ TEST_F(MetalEnvironment, ZeroCopyHostViewUnalignedFallsBack) {
     const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
     void* aligned = nullptr;
     ASSERT_EQ(::posix_memalign(&aligned, page, page * 2), 0);
-    auto* misaligned = static_cast<uint8_t*>(aligned) + 1;
-    auto cpu_buf = std::make_shared<Buffer>(misaligned, static_cast<int64_t>(page - 2));
-    ASSERT_OK_AND_ASSIGN(auto view, MemoryManager::ViewBuffer(cpu_buf, mm_));
-    // The base contract: ViewBuffer either returns a Metal-side view OR
-    // returns the source unchanged. Either way, view must be non-null.
-    EXPECT_NE(view, nullptr);
+    {
+        auto* misaligned = static_cast<uint8_t*>(aligned) + 1;
+        auto cpu_buf = std::make_shared<Buffer>(misaligned, static_cast<int64_t>(page - 2));
+        ASSERT_OK_AND_ASSIGN(auto view, MemoryManager::ViewBuffer(cpu_buf, mm_));
+        // The base contract: ViewBuffer either returns a Metal-side view OR
+        // returns the source unchanged. Either way, view must be non-null.
+        EXPECT_NE(view, nullptr);
+    }
     std::free(aligned);
 }
 TEST_F(MetalEnvironment, ViewBufferTo) {
@@ -249,19 +269,24 @@ TEST_F(MetalEnvironment, MemoryPoolAllocateFreeBalances) {
     EXPECT_EQ(pool->bytes_allocated(), starting);
     EXPECT_GE(pool->num_allocations(), 2);
 }
+struct WrapTestState {
+    int count;
+};
+static void WrapTestRelease(void* p, int64_t /*sz*/, void* ud) {
+    auto* st = static_cast<WrapTestState*>(ud);
+    ++st->count;
+    std::free(p);
+}
 TEST_F(MetalEnvironment, WrapInvokesDeallocatorOnce) {
     const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
     void* aligned = nullptr;
     ASSERT_EQ(::posix_memalign(&aligned, page, page), 0);
     std::memset(aligned, 0x77, page);
-    int dealloc_count = 0;
+    WrapTestState st{0};
     {
         ASSERT_OK_AND_ASSIGN(auto wrapped,
                              MetalBuffer::Wrap(mm_, aligned, static_cast<int64_t>(page),
-                                               [&](void* p, int64_t /*sz*/) {
-                                                   ++dealloc_count;
-                                                   std::free(p);
-                                               }));
+                                               &WrapTestRelease, &st));
         EXPECT_EQ(wrapped->data(), aligned);
         EXPECT_EQ(wrapped->size(), static_cast<int64_t>(page));
         EXPECT_EQ(wrapped->parent(), nullptr);  ///< sole-owner contract
@@ -271,7 +296,7 @@ TEST_F(MetalEnvironment, WrapInvokesDeallocatorOnce) {
         EXPECT_EQ(static_cast<uint8_t>(wrapped->data()[0]), static_cast<uint8_t>(0x77 * 2));
     }
     // After the MetalBuffer drops the deallocator must have run exactly once.
-    EXPECT_EQ(dealloc_count, 1);
+    EXPECT_EQ(st.count, 1);
 }
 TEST_F(MetalEnvironment, WrapRejectsMisaligned) {
     const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
@@ -279,7 +304,7 @@ TEST_F(MetalEnvironment, WrapRejectsMisaligned) {
     ASSERT_EQ(::posix_memalign(&aligned, page, page * 2), 0);
     auto* misaligned = static_cast<uint8_t*>(aligned) + 1;
     auto result = MetalBuffer::Wrap(mm_, misaligned, static_cast<int64_t>(page) - 2,
-                                    [](void*, int64_t) {});
+                                    /*release_fn=*/nullptr);
     EXPECT_FALSE(result.ok());
     std::free(aligned);
 }
@@ -295,6 +320,72 @@ TEST_F(MetalEnvironment, MemoryPoolReallocate) {
         ASSERT_EQ(p[i], 0xEE) << "lost data on Reallocate at byte " << i;
     }
     pool->Free(p, 256);
+}
+TEST_F(MetalEnvironment, NestedSliceGPUDispatch) {
+    constexpr int64_t kSize = 4096;
+    ASSERT_OK_AND_ASSIGN(auto unique, mm_->AllocateBuffer(kSize));
+    auto buf = std::shared_ptr<Buffer>(std::move(unique));
+    ASSERT_OK_AND_ASSIGN(auto root, MetalBuffer::FromBuffer(buf));
+    // Initialize root: each byte = i mod 256.
+    for (int64_t i = 0; i < kSize; ++i) {
+        root->mutable_data()[i] = static_cast<uint8_t>(i & 0xFF);
+    }
+    // Slice the middle 1024 bytes starting at offset 1024.
+    auto slice = std::make_shared<MetalBuffer>(root, /*offset=*/1024, /*size=*/1024);
+    EXPECT_EQ(slice->offset(), 1024);
+    EXPECT_EQ(slice->mtl_buffer(), nullptr);  ///< slice does not own MTLBuffer
+    EXPECT_EQ(slice->root_mtl_buffer(), root->mtl_buffer());
+    // Slice-of-slice: take middle 512 bytes of the outer slice.
+    auto sub = std::make_shared<MetalBuffer>(slice, /*offset=*/256, /*size=*/512);
+    EXPECT_EQ(sub->offset(), 1280);  ///< 1024 + 256, offsets compose
+    EXPECT_EQ(sub->root_mtl_buffer(), root->mtl_buffer());
+    // Dispatch byte-double against `sub`. DispatchByteDouble uses
+    // root_mtl_buffer() + offset() so this works for nested slices.
+    ASSERT_OK(DispatchByteDouble(*device_, *sub));
+    // Verify only the sub's bytes were doubled; surrounding bytes untouched.
+    for (int64_t i = 0; i < kSize; ++i) {
+        const auto orig = static_cast<uint8_t>(i & 0xFF);
+        const auto expected = (i >= 1280 && i < 1280 + 512)
+                                  ? static_cast<uint8_t>(orig * 2)
+                                  : orig;
+        ASSERT_EQ(root->data()[i], expected) << "mismatch at " << i;
+    }
+}
+TEST_F(MetalEnvironment, SyncEventConcurrentRecords) {
+    ASSERT_OK_AND_ASSIGN(auto event, mm_->MakeDeviceSyncEvent());
+    ASSERT_NE(event, nullptr);
+    auto* mev = static_cast<MetalDevice::SyncEvent*>(event.get());
+    constexpr int kThreads = 8;
+    constexpr int kPerThread = 16;
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    std::atomic<int> errors{0};
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            auto stream_result = device_->MakeStream();
+            if (!stream_result.ok()) {
+                errors.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            auto stream = stream_result.ValueOrDie();
+            for (int i = 0; i < kPerThread; ++i) {
+                if (!event->Record(*stream).ok()) {
+                    errors.fetch_add(1, std::memory_order_relaxed);
+                    return;
+                }
+            }
+            (void)t;
+        });
+    }
+    for (auto& th : threads) {
+        th.join();
+    }
+    EXPECT_EQ(errors.load(), 0);
+    // After kThreads * kPerThread Record() calls, the atomic counter
+    // must equal exactly that count — proves no lost updates.
+    EXPECT_EQ(mev->signal_value(), static_cast<uint64_t>(kThreads * kPerThread));
+    // Final Wait should complete cleanly.
+    ASSERT_OK(event->Wait());
 }
 
 }  // namespace metal

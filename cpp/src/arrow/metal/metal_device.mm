@@ -228,10 +228,13 @@ Status MetalDevice::Stream::WaitEvent(const Device::SyncEvent& event) {
     @autoreleasepool {
         id<MTLCommandQueue> queue =
             internal::FromOpaqueBorrowed<id<MTLCommandQueue>>(stream_.get());
-        auto& mev = const_cast<MetalDevice::SyncEvent&>(
-            static_cast<const MetalDevice::SyncEvent&>(event));
+        const auto& mev = static_cast<const MetalDevice::SyncEvent&>(event);
+        // FromOpaqueBorrowed needs a non-const void* (Apple's __bridge
+        // cannot operate on const pointers); the cast is safe because
+        // the MTLSharedEvent is mutable through Apple's API regardless.
         id<MTLSharedEvent> shared =
-            internal::FromOpaqueBorrowed<id<MTLSharedEvent>>(mev.get_raw());
+            internal::FromOpaqueBorrowed<id<MTLSharedEvent>>(
+                const_cast<void*>(mev.get_raw()));
         if (queue == nil || shared == nil) {
             return Status::Invalid("MetalDevice::Stream::WaitEvent received nil handles");
         }
@@ -280,9 +283,12 @@ Status MetalDevice::SyncEvent::Record(const Device::Stream& stream) {
         if (shared == nil || queue == nil) {
             return Status::Invalid("MetalDevice::SyncEvent::Record received nil handles");
         }
-        signal_value_ += 1;
+        // Atomically reserve the next signal value before committing the
+        // signal-encode. fetch_add returns the prior value; we want the
+        // post-increment value as the signal target.
+        const uint64_t v = signal_value_.fetch_add(1, std::memory_order_acq_rel) + 1;
         id<MTLCommandBuffer> cb = [queue commandBuffer];
-        [cb encodeSignalEvent:shared value:signal_value_];
+        [cb encodeSignalEvent:shared value:v];
         [cb commit];
         return Status::OK();
     }
@@ -294,10 +300,15 @@ Status MetalDevice::SyncEvent::Wait() {
         if (shared == nil) {
             return Status::Invalid("MetalDevice::SyncEvent::Wait received nil event");
         }
-        // Spin-wait via [event signaledValue] is wasteful; use the listener API.
-        // Returns YES when value reached, NO on timeout. timeoutMS=0 means
-        // "wait forever" per Apple docs.
-        BOOL ok = [shared waitUntilSignaledValue:signal_value_ timeoutMS:UINT64_MAX];
+        // Apple does not expose an "infinite wait" overload of
+        // waitUntilSignaledValue:, so we pass UINT64_MAX (≈584M years in
+        // milliseconds) as a practical infinity.
+        // Do NOT change this to 0: per Apple's docs `timeoutMS:0` returns
+        // immediately if the value has not yet been signaled, which would
+        // turn this into a non-blocking poll and silently break all
+        // CPU/GPU synchronisation.
+        const uint64_t target = signal_value_.load(std::memory_order_acquire);
+        BOOL ok = [shared waitUntilSignaledValue:target timeoutMS:UINT64_MAX];
         if (!ok) {
             return Status::IOError("MetalDevice::SyncEvent::Wait timed out");
         }

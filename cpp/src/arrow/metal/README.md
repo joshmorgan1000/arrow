@@ -15,12 +15,12 @@ GPU-addressable memory.
 ```
 cmake -DARROW_METAL=ON ..
 cmake --build . --target arrow_metal_shared
-ctest -R metal
+ctest -R arrow-metal --output-on-failure
 ```
 
-`ARROW_METAL` defaults to ON on Apple platforms (`if(APPLE)` in
-DefineOptions.cmake) and FATAL-errors elsewhere. There is no software
-fallback — Metal is Apple-only.
+`ARROW_METAL` defaults to OFF (parity with `ARROW_CUDA`) — must be
+opted in explicitly. Setting `-DARROW_METAL=ON` on a non-Apple platform
+FATAL-errors with a clear message; there is no software fallback.
 
 ## Public API
 
@@ -60,7 +60,7 @@ Buffer remains the sole owner.
 ## Tests
 
 ```
-ctest -R metal --output-on-failure
+ctest -R arrow-metal --output-on-failure --output-on-failure
 ```
 
 Tests skip gracefully via `GTEST_SKIP()` if no Metal device is present

@@ -18,7 +18,6 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 
 #include "arrow/buffer.h"
@@ -50,87 +49,122 @@ class MetalMemoryManager;
 /// split that does not exist on Apple Silicon.
 class ARROW_METAL_EXPORT MetalBuffer : public Buffer {
  public:
-  /// \brief Take ownership of an MTLBuffer allocated with
-  ///        MTLResourceStorageModeShared
-  /// \param[in] mtl_buffer opaque retained handle to id<MTLBuffer>
-  ///            (obtained from MetalMemoryManager::AllocateMTLBuffer or
-  ///             internal::ToOpaqueRetained)
-  /// \param[in] mm the MetalMemoryManager that produced the buffer
-  /// \param[in] parent optional source buffer pinned for the lifetime of
-  ///            this MetalBuffer; used by ViewBufferFrom to keep the
-  ///            underlying CPU pages alive when wrapping host memory
-  ///            via newBufferWithBytesNoCopy
-  MetalBuffer(void* mtl_buffer, std::shared_ptr<MetalMemoryManager> mm,
-              std::shared_ptr<Buffer> parent = nullptr);
-  /** ------------------------------------------------------------------------------- Slice
-   * @brief Construct a sub-range view into a parent MetalBuffer
-   * @param parent the buffer whose storage is shared
-   * @param offset byte offset into the parent
-   * @param size length of the slice
-   *
-   * The slice carries a shared_ptr to the parent so the underlying
-   * MTLBuffer outlives every view. data() points at parent->data()+offset,
-   * still GPU-addressable because the shared MTLBuffer is unchanged.
-   */
-  MetalBuffer(const std::shared_ptr<MetalBuffer>& parent, int64_t offset, int64_t size);
-  ~MetalBuffer() override;
-  /** ------------------------------------------------------------------------------- FromBuffer
-   * @brief Downcast a generic Buffer to MetalBuffer
-   * @param buffer the buffer to downcast
-   * @return MetalBuffer or Status::Invalid if the buffer is not Metal-backed
-   */
-  static Result<std::shared_ptr<MetalBuffer>> FromBuffer(std::shared_ptr<Buffer> buffer);
-  /** ------------------------------------------------------------------------------- mtl_buffer
-   * @brief Return the opaque (borrowed) `id<MTLBuffer>` handle
-   *
-   * Cast back via `internal::FromOpaqueBorrowed<id<MTLBuffer>>` from .mm
-   * code. The returned pointer is owned by this MetalBuffer; do NOT
-   * release it.
-   *
-   * @return opaque handle suitable for `__bridge` cast to id<MTLBuffer>
-   */
-  void* mtl_buffer() const { return mtl_buffer_; }
-    /** ----------------------------------------------------------------------- offset
-     * @brief Byte offset of this view within its underlying MTLBuffer
+    /** ----------------------------------------------------------------------------- Constructor
+     * @brief Take ownership of an MTLBuffer allocated with MTLResourceStorageModeShared.
      *
-     * Slice views report a non-zero offset; the root buffer reports 0.
-     * GPU encoders consuming this buffer should add `offset()` to the
-     * dispatch start address.
+     * @param mtl_buffer    opaque retained handle to id<MTLBuffer> (from
+     *                      MetalMemoryManager::AllocateBuffer or internal::ToOpaqueRetained).
+     * @param mm            the MetalMemoryManager that produced the buffer.
+     * @param parent        optional source buffer pinned for the lifetime of this MetalBuffer;
+     *                      used by ViewBufferFrom to keep the underlying CPU pages alive when
+     *                      wrapping host memory via newBufferWithBytesNoCopy.
+     * @param logical_size  optional Arrow-visible size override. When negative (default),
+     *                      size() returns `[mtl_buffer length]`. When non-negative, size()
+     *                      returns this value — useful for zero-length Arrow buffers backed
+     *                      by a 1-byte MTLBuffer (Apple rejects 0-length newBufferWithLength).
+     *                      Must be <= the underlying MTLBuffer length.
+     */
+    MetalBuffer(void* mtl_buffer, std::shared_ptr<MetalMemoryManager> mm,
+                std::shared_ptr<Buffer> parent = nullptr,
+                int64_t logical_size = -1);
+    /** ----------------------------------------------------------------------------- Slice
+     * @brief Construct a sub-range view into a parent MetalBuffer.
+     *
+     * The slice carries a shared_ptr to the parent so the underlying MTLBuffer outlives
+     * every view. data() points at parent->data()+offset, still GPU-addressable because
+     * the shared MTLBuffer is unchanged.
+     *
+     * @param parent  the buffer whose storage is shared.
+     * @param offset  byte offset into the parent.
+     * @param size    length of the slice.
+     */
+    MetalBuffer(const std::shared_ptr<MetalBuffer>& parent, int64_t offset, int64_t size);
+    ~MetalBuffer() override;
+    /// \brief Release callback signature for `MetalBuffer::Wrap`.
+    ///
+    /// Invoked exactly once when the underlying MTLBuffer's last retain drops. `host_ptr`
+    /// and `size` are the values originally passed to `Wrap`; `user_data` is the pointer
+    /// the caller supplied alongside `release_fn` (use to thread state without capturing).
+    using ReleaseFn = void (*)(void* host_ptr, int64_t size, void* user_data);
+    /** ----------------------------------------------------------------------------- FromBuffer
+     * @brief Downcast a generic Buffer to MetalBuffer.
+     * @param buffer  the buffer to downcast.
+     * @return        MetalBuffer or Status::Invalid if the buffer is not Metal-backed.
+     */
+    static Result<std::shared_ptr<MetalBuffer>> FromBuffer(std::shared_ptr<Buffer> buffer);
+    /** ----------------------------------------------------------------------------- Wrap
+     * @brief Wrap externally-owned host memory as a Metal-coherent buffer.
+     *
+     * Calls `[device newBufferWithBytesNoCopy:host_ptr length:size
+     * options:MTLResourceStorageModeShared deallocator:cb]` where `cb` invokes the supplied
+     * `release_fn(host_ptr, size, user_data)` exactly once when the underlying MTLBuffer is
+     * finally released.
+     *
+     * **Ownership contract — read carefully**:
+     * - The returned MetalBuffer owns the MTLBuffer; the MTLBuffer's `deallocator` block
+     *   owns the host memory.
+     * - When the MetalBuffer is destroyed, the MTLBuffer is released; when the last retain
+     *   drops, Apple invokes `release_fn`.
+     * - Do NOT pin `host_ptr`'s parent buffer via Arrow's `parent_` slot — that would
+     *   create two paths to free the same memory. Either Apple's deallocator owns it
+     *   (use Wrap) or Arrow's parent_ owns it (use ViewBuffer with a parent Arrow
+     *   Buffer), never both.
+     *
+     * `host_ptr` and `size` MUST be page-aligned (`getpagesize()`). Misaligned inputs
+     * return Status::Invalid; the caller can fall back to AllocateBuffer + memcpy.
+     *
+     * @param mm          Metal MemoryManager that owns the device.
+     * @param host_ptr    page-aligned base of the host allocation.
+     * @param size        page-multiple length in bytes.
+     * @param release_fn  free function called once at MTLBuffer release. Pass nullptr to
+     *                    indicate the host memory is externally managed and needs no
+     *                    callback.
+     * @param user_data   opaque pointer forwarded to release_fn.
+     */
+    static Result<std::shared_ptr<MetalBuffer>> Wrap(
+        std::shared_ptr<MetalMemoryManager> mm, void* host_ptr, int64_t size,
+        ReleaseFn release_fn, void* user_data = nullptr);
+    /** ----------------------------------------------------------------------------- mtl_buffer
+     * @brief Return the opaque (borrowed) `id<MTLBuffer>` handle, or nullptr for slices.
+     *
+     * Cast back via `internal::FromOpaqueBorrowed<id<MTLBuffer>>` from .mm code. The
+     * returned pointer is owned by this MetalBuffer; do NOT release it.
+     *
+     * **Slice views**: returns `nullptr` because the MTLBuffer is held by `parent()`.
+     * Use `root_mtl_buffer()` paired with `offset()` when encoding GPU work against a
+     * slice — that helper walks the parent_ chain so callers don't have to.
+     *
+     * @return opaque handle suitable for `__bridge` cast to id<MTLBuffer>, or nullptr.
+     */
+    void* mtl_buffer() const { return mtl_buffer_; }
+    /** ----------------------------------------------------------------------------- root_mtl_buffer
+     * @brief Walk parent_ chain and return the root MTLBuffer for any view.
+     *
+     * For root buffers this is identical to `mtl_buffer()`. For slices, recurses
+     * through `parent()` until it finds the buffer that owns the MTLBuffer.
+     *
+     * Pair with `offset()` when encoding GPU work:
+     *
+     * ```cpp
+     * id<MTLBuffer> root = (__bridge id<MTLBuffer>)buf->root_mtl_buffer();
+     * [encoder setBuffer:root offset:buf->offset() atIndex:N];
+     * ```
+     */
+    void* root_mtl_buffer() const;
+    /** ----------------------------------------------------------------------------- offset
+     * @brief Byte offset of this view within the root MTLBuffer.
+     *
+     * Slice views report a non-zero offset (slice offsets compose, so a slice-of-a-slice
+     * reports the absolute offset within the root). Root buffers report 0. GPU encoders
+     * consuming this buffer should pass `offset()` directly as the encoder offset.
      */
     int64_t offset() const { return offset_; }
  protected:
     /// \brief Opaque retained handle to the underlying MTLBuffer (root only).
     /// For slice views, mtl_buffer_ is nullptr and the parent owns the storage.
     void* mtl_buffer_;
-    /// \brief Byte offset into the underlying MTLBuffer
+    /// \brief Byte offset into the root MTLBuffer (already composed for nested slices).
     int64_t offset_;
- public:
-    /** ----------------------------------------------------------------------- Wrap
-     * @brief Wrap externally-owned host memory as a Metal-coherent buffer
-     *
-     * Calls `[device newBufferWithBytesNoCopy:host_ptr length:size
-     * options:MTLResourceStorageModeShared deallocator:cb]` where `cb`
-     * invokes the supplied `release_fn(host_ptr, size)` exactly once
-     * when the underlying MTLBuffer is finally released.
-     *
-     * **Ownership contract — read carefully**:
-     * - The returned MetalBuffer owns the MTLBuffer; the MTLBuffer's
-     *   `deallocator` block owns the host memory.
-     * - When the MetalBuffer is destroyed, the MTLBuffer is released;
-     *   when the last retain drops, Apple invokes `release_fn`.
-     * - Do NOT pin `host_ptr`'s parent buffer via Arrow's `parent_`
-     *   slot — that would create two paths to free the same memory.
-     *   Either Apple's deallocator owns it (use Wrap) or Arrow's
-     *   parent_ owns it (use ViewBuffer with a parent Arrow Buffer),
-     *   never both.
-     *
-     * `host_ptr` and `size` MUST be page-aligned (`getpagesize()`).
-     * Misaligned inputs return Status::Invalid; the caller can fall
-     * back to AllocateBuffer + memcpy.
-     */
-    static Result<std::shared_ptr<MetalBuffer>> Wrap(
-        std::shared_ptr<MetalMemoryManager> mm, void* host_ptr, int64_t size,
-        std::function<void(void*, int64_t)> release_fn);
 };
 /** --------------------------------------------------------------------------------------------- IsMetalBuffer
  * @brief Whether a Buffer's storage is backed by Metal

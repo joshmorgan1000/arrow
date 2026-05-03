@@ -334,7 +334,11 @@ endmacro()
 
 define_option(ACERO "Build the PyArrow Acero integration" ARROW_ACERO)
 define_option(CUDA "Build the PyArrow CUDA support" ARROW_CUDA)
-define_option(METAL "Build the PyArrow Metal support" ARROW_METAL)
+# Metal Python bindings are not implemented yet; the C++ arrow_metal
+# library is exposed through native APIs but pyarrow.metal does not
+# exist. When Cython bindings are added, re-introduce
+# `define_option(METAL ... ARROW_METAL)` here and gate the extension
+# target on PYARROW_BUILD_METAL.
 define_option(DATASET "Build the PyArrow Dataset integration" ARROW_DATASET)
 define_option(FLIGHT "Build the PyArrow Flight integration" ARROW_FLIGHT)
 define_option(GANDIVA "Build the PyArrow Gandiva integration" ARROW_GANDIVA)

@@ -17,13 +17,18 @@
 # under the License.
 
 # Local smoke check for ARROW_METAL: configure, build only the metal
-# target + its tests, run them, and clean up. Intended for fast iteration
-# on macOS while developing arrow_metal.
+# target + its tests, run them. Intended for fast iteration on macOS
+# while developing arrow_metal.
 #
 # Usage:
 #   ci/scripts/cpp_metal_smoke.sh [build_dir]
 #
 # If unset, build_dir defaults to /tmp/arrow-metal-check.
+#
+# Override `ARROW_METAL_DEPS` to control dependency resolution:
+#   AUTO    (default) — system / Homebrew where available, BUNDLED otherwise
+#   BUNDLED            — build everything from source (slow first run)
+#   SYSTEM             — fail if system dep is missing
 
 set -euo pipefail
 
@@ -34,22 +39,21 @@ fi
 
 BUILD_DIR="${1:-/tmp/arrow-metal-check}"
 SOURCE_DIR="$(cd "$(dirname "$0")/../.." && pwd)/cpp"
-
-mkdir -p "${BUILD_DIR}"
-cd "${BUILD_DIR}"
+ARROW_METAL_DEPS="${ARROW_METAL_DEPS:-AUTO}"
 
 cmake -GNinja \
+  -S "${SOURCE_DIR}" \
+  -B "${BUILD_DIR}" \
   -DARROW_METAL=ON \
   -DARROW_BUILD_TESTS=ON \
   -DARROW_BUILD_BENCHMARKS=OFF \
   -DARROW_BUILD_SHARED=ON \
   -DARROW_BUILD_STATIC=OFF \
-  -DARROW_DEPENDENCY_SOURCE=BUNDLED \
+  -DARROW_DEPENDENCY_SOURCE="${ARROW_METAL_DEPS}" \
   -DARROW_IPC=ON \
   -DARROW_JEMALLOC=OFF \
   -DARROW_MIMALLOC=OFF \
-  -DCMAKE_BUILD_TYPE=Release \
-  "${SOURCE_DIR}"
+  -DCMAKE_BUILD_TYPE=Release
 
-ninja arrow-metal-test
-"./release/arrow-metal-test"
+ninja -C "${BUILD_DIR}" arrow-metal-test
+ctest --test-dir "${BUILD_DIR}" -R arrow-metal --output-on-failure

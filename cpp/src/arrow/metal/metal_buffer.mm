@@ -30,16 +30,25 @@ constexpr const char* kMetalDeviceTypeName = "arrow::metal::MetalDevice";
 }  // namespace
 
 MetalBuffer::MetalBuffer(void* mtl_buffer, std::shared_ptr<MetalMemoryManager> mm,
-                         std::shared_ptr<Buffer> parent)
+                         std::shared_ptr<Buffer> parent, int64_t logical_size)
     : Buffer(/*data=*/nullptr, /*size=*/0),
       mtl_buffer_{mtl_buffer},
       offset_{0} {
     @autoreleasepool {
         id<MTLBuffer> buf = internal::FromOpaqueBorrowed<id<MTLBuffer>>(mtl_buffer);
         // Length cast: MTLBuffer length is NSUInteger (size_t); Arrow Buffer
-        // size is int64_t. Capacity == size for shared-memory MTL allocations.
-        size_ = static_cast<int64_t>([buf length]);
-        capacity_ = size_;
+        // size is int64_t. Capacity == size for shared-memory MTL allocations
+        // unless an explicit logical_size override was supplied (used by
+        // AllocateBuffer(0): MTL refuses zero-length, so we pad to 1 byte
+        // internally but expose size()==0 to Arrow).
+        const int64_t mtl_len = static_cast<int64_t>([buf length]);
+        if (logical_size >= 0) {
+            size_ = logical_size;
+            capacity_ = logical_size;
+        } else {
+            size_ = mtl_len;
+            capacity_ = mtl_len;
+        }
         data_ = static_cast<const uint8_t*>([buf contents]);
         is_mutable_ = true;
     }
@@ -79,6 +88,17 @@ Result<std::shared_ptr<MetalBuffer>> MetalBuffer::FromBuffer(
     return cast;
 }
 
+void* MetalBuffer::root_mtl_buffer() const {
+    // Walk parent_ chain. Slices have mtl_buffer_ == nullptr and a non-null
+    // parent_; the root has the retained MTLBuffer. The chain is finite
+    // because each slice's parent_ is the buffer it sliced from.
+    const MetalBuffer* cur = this;
+    while (cur->mtl_buffer_ == nullptr && cur->parent_ != nullptr) {
+        cur = static_cast<const MetalBuffer*>(cur->parent_.get());
+    }
+    return cur->mtl_buffer_;
+}
+
 bool IsMetalBuffer(const Buffer& buffer) {
     return buffer.device_type() == DeviceAllocationType::kMETAL &&
            buffer.device()->type_name() == kMetalDeviceTypeName;
@@ -86,7 +106,7 @@ bool IsMetalBuffer(const Buffer& buffer) {
 
 Result<std::shared_ptr<MetalBuffer>> MetalBuffer::Wrap(
     std::shared_ptr<MetalMemoryManager> mm, void* host_ptr, int64_t size,
-    std::function<void(void*, int64_t)> release_fn) {
+    ReleaseFn release_fn, void* user_data) {
     if (host_ptr == nullptr || size <= 0) {
         return Status::Invalid("MetalBuffer::Wrap: host_ptr/size must be non-null/positive");
     }
@@ -97,21 +117,22 @@ Result<std::shared_ptr<MetalBuffer>> MetalBuffer::Wrap(
             "MetalBuffer::Wrap: host_ptr and size must be page-aligned (",
             page, "-byte page)");
     }
-    auto release_copy = std::move(release_fn);  ///< captured by Block
     @autoreleasepool {
         id<MTLDevice> dev =
             internal::FromOpaqueBorrowed<id<MTLDevice>>(mm->metal_device()->mtl_device());
         // Apple invokes the deallocator block exactly once when the
         // MTLBuffer's last retain is released. The block captures the
-        // std::function by value so the user-supplied release_fn lives
-        // on the heap until called.
+        // function pointer + user_data by value (no heap allocation,
+        // no std::function overhead).
+        ReleaseFn const fn = release_fn;
+        void* const ud = user_data;
         id<MTLBuffer> mtl =
             [dev newBufferWithBytesNoCopy:host_ptr
                                   length:static_cast<NSUInteger>(size)
                                  options:MTLResourceStorageModeShared
                              deallocator:^(void* p, NSUInteger sz) {
-                               if (release_copy) {
-                                 release_copy(p, static_cast<int64_t>(sz));
+                               if (fn != nullptr) {
+                                 fn(p, static_cast<int64_t>(sz), ud);
                                }
                              }];
         if (mtl == nil) {
