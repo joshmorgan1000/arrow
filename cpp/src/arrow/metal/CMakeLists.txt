@@ -41,7 +41,6 @@ add_dependencies(arrow_metal-all arrow_metal arrow_metal-tests
 # absolute path to downstream consumers via the exported target.
 find_library(ARROW_METAL_FRAMEWORK Metal REQUIRED)
 find_library(ARROW_FOUNDATION_FRAMEWORK Foundation REQUIRED)
-find_library(ARROW_QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
 
 # Capture the SDK version so metal_version.h reflects the build environment.
 # CMake exposes the SDK in CMAKE_OSX_SYSROOT; parse the SDKSettings.plist
@@ -86,8 +85,7 @@ endforeach()
 
 set(ARROW_METAL_LINK_LIBS arrow::flatbuffers)
 set(ARROW_METAL_SHARED_LINK_LIBS ${ARROW_METAL_FRAMEWORK}
-                                 ${ARROW_FOUNDATION_FRAMEWORK}
-                                 ${ARROW_QUARTZCORE_FRAMEWORK})
+                                 ${ARROW_FOUNDATION_FRAMEWORK})
 
 set(ARROW_METAL_PKG_CONFIG_NAME_ARGS)
 if(NOT WINDOWS)

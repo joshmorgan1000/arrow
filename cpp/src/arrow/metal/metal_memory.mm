@@ -101,8 +101,8 @@ Result<std::unique_ptr<Buffer>> MetalMemoryManager::AllocateBuffer(int64_t size)
         id<MTLDevice> dev =
             internal::FromOpaqueBorrowed<id<MTLDevice>>(metal_device()->mtl_device());
         // [device newBufferWithLength:0 ...] returns nil on Apple Silicon, so
-        // fall through to a 1-byte allocation for empty buffers; the Arrow
-        // Buffer object will still report size=0.
+        // pad to a 1-byte allocation for empty buffers and pass logical_size=0
+        // through to MetalBuffer so Arrow consumers see size()==0 / capacity()==0.
         const NSUInteger alloc_size = size == 0 ? 1 : static_cast<NSUInteger>(size);
         id<MTLBuffer> mtl =
             [dev newBufferWithLength:alloc_size options:MTLResourceStorageModeShared];
@@ -112,14 +112,9 @@ Result<std::unique_ptr<Buffer>> MetalMemoryManager::AllocateBuffer(int64_t size)
         }
         void* opaque = internal::ToOpaqueRetained(mtl);
         auto mm = std::static_pointer_cast<MetalMemoryManager>(shared_from_this());
-        auto buf = std::make_unique<MetalBuffer>(opaque, std::move(mm));
-        // Override size for empty buffers (the MTLBuffer is 1 byte but the
-        // Arrow Buffer must report 0).
-        // Done via a second MetalBuffer slice ctor would be cleaner, but
-        // size == 0 is rare and we just leave size_ as the MTLBuffer length
-        // (clamped to 1). Callers who care use length() of the data, not
-        // the Buffer size().
-        return buf;
+        return std::make_unique<MetalBuffer>(opaque, std::move(mm),
+                                             /*parent=*/nullptr,
+                                             /*logical_size=*/size);
     }
 }
 Result<std::shared_ptr<Device::SyncEvent>> MetalMemoryManager::MakeDeviceSyncEvent() {

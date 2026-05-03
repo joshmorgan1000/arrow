@@ -32,6 +32,16 @@
 namespace arrow {
 namespace metal {
 namespace {
+/// Skip the benchmark gracefully if no Metal device exists (headless CI
+/// runners on Intel macOS, virtualized hosts). Returns false and marks
+/// the benchmark skipped; caller should `return` immediately.
+bool RequireMetal(benchmark::State& state) {
+    if (!MetalDevice::Default().ok()) {
+        state.SkipWithError("No Metal device on this host");
+        return false;
+    }
+    return true;
+}
 /** --------------------------------------------------------------------------------------------- AllocateBuffer
  * @brief Time MetalMemoryManager::AllocateBuffer at varying sizes.
  *
@@ -40,6 +50,9 @@ namespace {
  * pages; for small allocations Metal's caching dominates.
  */
 void BM_AllocateBuffer(benchmark::State& state) {
+    if (!RequireMetal(state)) {
+        return;
+    }
     auto device = MetalDevice::Default().ValueOrDie();
     auto mm = std::static_pointer_cast<MetalMemoryManager>(device->default_memory_manager());
     const int64_t size = state.range(0);
@@ -57,6 +70,9 @@ BENCHMARK(BM_AllocateBuffer)->Arg(1 << 12)->Arg(1 << 20)->Arg(1 << 24)->Arg(1 <<
  * memcpy-bound on Apple Silicon since storage is unified.
  */
 void BM_CPUtoMetalCopy(benchmark::State& state) {
+    if (!RequireMetal(state)) {
+        return;
+    }
     auto device = MetalDevice::Default().ValueOrDie();
     auto mm = std::static_pointer_cast<MetalMemoryManager>(device->default_memory_manager());
     const int64_t size = state.range(0);
@@ -78,6 +94,9 @@ BENCHMARK(BM_CPUtoMetalCopy)->Arg(1 << 12)->Arg(1 << 20)->Arg(1 << 24)->Arg(1 <<
  * newBufferWithBytesNoCopy:...]` plus retain/release; no data is copied.
  */
 void BM_CPUtoMetalView(benchmark::State& state) {
+    if (!RequireMetal(state)) {
+        return;
+    }
     auto device = MetalDevice::Default().ValueOrDie();
     auto mm = std::static_pointer_cast<MetalMemoryManager>(device->default_memory_manager());
     const size_t page = static_cast<size_t>(::sysconf(_SC_PAGESIZE));
@@ -104,6 +123,9 @@ BENCHMARK(BM_CPUtoMetalView)->Arg(1 << 12)->Arg(1 << 20)->Arg(1 << 24)->Arg(1 <<
  * empty so the kernel is queue+event scheduling overhead.
  */
 void BM_SyncEventRecordWait(benchmark::State& state) {
+    if (!RequireMetal(state)) {
+        return;
+    }
     auto device = MetalDevice::Default().ValueOrDie();
     auto mm = std::static_pointer_cast<MetalMemoryManager>(device->default_memory_manager());
     auto event = mm->MakeDeviceSyncEvent().ValueOrDie();
@@ -124,6 +146,10 @@ BENCHMARK(BM_SyncEventRecordWait);
  */
 void BM_MetalPoolAllocFree(benchmark::State& state) {
     auto* pool = MetalMemoryPool::Instance();
+    if (pool == nullptr) {
+        state.SkipWithError("No Metal device on this host");
+        return;
+    }
     const int64_t size = state.range(0);
     for (auto _ : state) {
         uint8_t* p = nullptr;

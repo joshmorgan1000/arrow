@@ -307,19 +307,12 @@ takes precedence over ccache if a storage backend is configured" ON)
                 DEPENDS
                 ARROW_IPC)
 
-  # Auto-enable ARROW_METAL on Apple platforms (Metal.framework is part of the
-  # base SDK on macOS/iOS). Defaults to OFF elsewhere; setting -DARROW_METAL=ON
-  # on a non-Apple platform will fail in metal/CMakeLists.txt with a clear
-  # error, since Metal is only available on Darwin.
-  if(APPLE)
-    set(ARROW_METAL_DEFAULT ON)
-  else()
-    set(ARROW_METAL_DEFAULT OFF)
-  endif()
-
+  # ARROW_METAL must be enabled explicitly. Mirrors ARROW_CUDA which is
+  # also default-OFF. Setting -DARROW_METAL=ON on a non-Apple platform
+  # FATAL-errors in cpp/CMakeLists.txt with a clear message.
   define_option(ARROW_METAL
-                "Build the Arrow Metal extensions (auto-enabled on Apple)"
-                ${ARROW_METAL_DEFAULT}
+                "Build the Arrow Metal extensions (Apple Silicon, requires Metal.framework)"
+                OFF
                 DEPENDS
                 ARROW_IPC)
 
