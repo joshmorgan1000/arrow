@@ -105,18 +105,32 @@ Tests skip gracefully on hosts without a Vulkan device or without
 
 ## Benchmarks
 
-Representative numbers on Apple M4 Max (MoltenVK, single thread, release):
+**Apple M4 Max (MoltenVK 1.3.0, single thread, release):**
 
 | Benchmark                          | 4 KiB     | 256 MiB   |
 |------------------------------------|-----------|-----------|
 | `BM_AllocateBuffer`                | ~3.7 µs   | ~18 µs    |
 | `BM_CPUtoVulkanCopy`               | ~5 µs     | ~13 ms    |
-| `BM_CPUtoVulkanView` (zero-copy)   | (skipped on MoltenVK) | — |
+| `BM_CPUtoVulkanView` (zero-copy)   | (skipped — MoltenVK rejects external_memory_host at vkCreateBuffer) | — |
 | `BM_SyncEventRecordWait`           | ~20 µs    | n/a       |
 | `BM_VulkanPoolAllocFree`           | ~3.7 µs   | ~9.4 µs   |
 
-Numbers from Ryzen 890M (RADV, where `BM_CPUtoVulkanView` actually runs)
-will be added once measured.
+**AMD Ryzen AI 9 HX 370 / Radeon 890M (RADV, Mesa 25.2, Ubuntu 24.04, single thread,
+CPU scaling on — numbers noisy):**
+
+| Benchmark                          | 4 KiB     | 256 MiB   |
+|------------------------------------|-----------|-----------|
+| `BM_AllocateBuffer`                | ~258 µs   | ~8.7 ms   |
+| `BM_CPUtoVulkanCopy`               | ~85 µs    | ~30 ms    |
+| `BM_CPUtoVulkanView` (zero-copy)   | **~18 µs** | **~22 ms** |
+| `BM_SyncEventRecordWait`           | ~75 µs    | n/a       |
+| `BM_VulkanPoolAllocFree`           | ~89 µs    | ~2 ms     |
+
+The `View` win on Linux Vulkan is smaller than Metal-on-Apple-Silicon (only
+~1.4× at 256 MiB vs 1000× for Metal) because `vkAllocateMemory` does real
+page-table work even for imported host memory. But it's still a copy
+avoided, and the headline contract (one allocation visible to both CPU
+and GPU at the same address) holds.
 
 ## Design constraint: pure-C++ headers
 
