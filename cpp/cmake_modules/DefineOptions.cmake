@@ -316,6 +316,12 @@ takes precedence over ccache if a storage backend is configured" ON)
                 DEPENDS
                 ARROW_IPC)
 
+  define_option(ARROW_VULKAN
+                "Build the Arrow Vulkan extensions (requires Vulkan 1.2+ loader/headers)"
+                OFF
+                DEPENDS
+                ARROW_IPC)
+
   define_option(ARROW_DATASET
                 "Build the Arrow Dataset Modules"
                 OFF

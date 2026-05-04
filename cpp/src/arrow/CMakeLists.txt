@@ -1361,6 +1361,10 @@ if(ARROW_METAL)
   add_subdirectory(metal)
 endif()
 
+if(ARROW_VULKAN)
+  add_subdirectory(vulkan)
+endif()
+
 if(ARROW_DATASET)
   add_subdirectory(dataset)
 endif()
