@@ -55,6 +55,7 @@ needs_benchmarks = get_option('benchmarks').enabled()
 needs_csv = get_option('csv').enabled()
 needs_cuda = false
 needs_metal = false  # ARROW_METAL is CMake-only; meson build does not yet wire it
+needs_vulkan = false  # ARROW_VULKAN is CMake-only; meson build does not yet wire it
 needs_substrait = get_option('substrait').enabled()
 needs_dataset = get_option('dataset').enabled() or needs_substrait
 needs_azure = get_option('azure').enabled()

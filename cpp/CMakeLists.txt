@@ -238,6 +238,14 @@ if(ARROW_METAL)
   enable_language(OBJCXX)
 endif()
 
+if(ARROW_VULKAN)
+  # FindVulkan has been part of CMake since 3.7 and provides the
+  # Vulkan::Vulkan target plus version detection. We require >=1.2 for
+  # core timeline semaphores (used by VulkanDevice::SyncEvent). On macOS
+  # this resolves to MoltenVK via Homebrew (libvulkan.dylib + libMoltenVK).
+  find_package(Vulkan 1.2 REQUIRED)
+endif()
+
 if(ARROW_BUILD_SHARED AND NOT ARROW_POSITION_INDEPENDENT_CODE)
   message(WARNING "Can't disable position-independent code to build shared libraries, enabling"
   )
@@ -474,6 +482,13 @@ set(ARROW_METAL_PC_CFLAGS "")
 set(ARROW_METAL_PC_CFLAGS_PRIVATE "")
 if(ARROW_BUILD_STATIC)
   string(APPEND ARROW_METAL_PC_CFLAGS_PRIVATE " -DARROW_METAL_STATIC")
+endif()
+
+# For arrow-vulkan.pc.
+set(ARROW_VULKAN_PC_CFLAGS "")
+set(ARROW_VULKAN_PC_CFLAGS_PRIVATE "")
+if(ARROW_BUILD_STATIC)
+  string(APPEND ARROW_VULKAN_PC_CFLAGS_PRIVATE " -DARROW_VULKAN_STATIC")
 endif()
 
 # For arrow-dataset.pc.
